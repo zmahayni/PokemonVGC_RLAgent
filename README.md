@@ -1,0 +1,1 @@
+Creating an Agent that plays Pokemon VGC that is able to beat me. For reference, I am rated around 1300-1400, which is a lower intermediate level, but still good enough to know how to play. Will be updating this README as I work on this. 
