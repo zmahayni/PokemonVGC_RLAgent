@@ -1,7 +1,10 @@
+venv/
 __pycache__/
 *.pyc
-venv/
-.ipynb_checkpoints/
-runs/
-logs/
-checkpoints/
+*.ipynb_checkpoints
+reports/
+models/
+data/
+pokemon-showdown
+
+
