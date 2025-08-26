@@ -1,7 +1,7 @@
 from gymnasium.spaces import Space, Box, Discrete
 import numpy as np
 
-class Player():
+class ToyPlayer():
     def __init__(self):
         self.observation_space = Box(low=0.0, high=1.0, shape=(2,), dtype=np.float32) 
         self.action_space = Discrete(2)
@@ -38,7 +38,7 @@ class Player():
 
         incoming_damage = opp_damage
         if player_defend:
-            incoming_damage //= 2
+            incoming_damage = np.random.choice([0,1])
         
         incoming_to_opp = player_damage
 
