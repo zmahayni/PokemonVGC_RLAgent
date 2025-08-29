@@ -1,8 +1,8 @@
 import torch
 import gymnasium as gym
-from dqn_toy import DQN
-from toy_env import ToyPlayer
-from experience_replay import ReplayMemory
+from src.agents.dqn_toy import DQN
+from src.envs.toy_env import ToyPlayer
+from src.agents.experience_replay import ReplayMemory
 import itertools
 import yaml
 import random
