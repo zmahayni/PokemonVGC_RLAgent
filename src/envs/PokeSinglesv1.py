@@ -2,7 +2,9 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 from poke_env.player import RandomPlayer
-from GymBridgePlayer import GymBridgePlayer
+from .GymBridgePlayer import GymBridgePlayer
+from poke_env.ps_client.server_configuration import LocalhostServerConfiguration
+from poke_env.ps_client.account_configuration import AccountConfiguration
 import asyncio
 
 # Format: gen9randombattle (both sides random; fixed team comes later in OU).
@@ -30,9 +32,16 @@ class PokeSinglesV1(gym.Env):
         self.max_turns = max_turns
         self.battle_format = battle_format
         self.battle = None
-
-        self.agent = GymBridgePlayer(battle_format=self.battle_format)
-        self.opponent = RandomPlayer(battle_format=self.battle_format)
+        self.agent = GymBridgePlayer(
+            battle_format="gen9randombattle",
+            server_configuration=LocalhostServerConfiguration,
+            account_configuration=AccountConfiguration.generate("agent_key", rand=True),
+        )
+        self.opponent = RandomPlayer(
+            battle_format="gen9randombattle",
+            server_configuration=LocalhostServerConfiguration,
+            account_configuration=AccountConfiguration.generate("opp_key", rand=True),
+        )
 
     def reset(self, seed=None, battle_format="gen9randombattle"):
         self.my_hp = 1
