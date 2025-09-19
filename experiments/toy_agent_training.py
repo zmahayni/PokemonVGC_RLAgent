@@ -19,7 +19,7 @@ os.makedirs(OUT_DIR, exist_ok=True)
 
 MODEL_PATH_BEST = os.path.join(OUT_DIR, f"{run_id}_policy_best.pt")
 MODEL_PATH_LAST = os.path.join(OUT_DIR, f"{run_id}_policy_last.pt")
-CURVE_PATH      = os.path.join(OUT_DIR, f"{run_id}_reward_curve.png")
+CURVE_PATH = os.path.join(OUT_DIR, f"{run_id}_reward_curve.png")
 
 
 class Toy_Agent:
@@ -61,14 +61,15 @@ class Toy_Agent:
 
             step_count = 0
 
-            self.optimizer = torch.optim.Adam(policy_dqn.parameters(), lr=self.learning_rate_a)
+            self.optimizer = torch.optim.Adam(
+                policy_dqn.parameters(), lr=self.learning_rate_a
+            )
 
         for episode in range(10000):
             state, _ = env.reset()
             state = torch.tensor(state, dtype=torch.float, device=device)
             episode_reward = 0.0
             while True:
-
                 if is_training and random.random() < epsilon:
                     action = env.action_space.sample()
                     action = torch.tensor(action, dtype=torch.int64, device=device)
@@ -83,9 +84,7 @@ class Toy_Agent:
                 reward = torch.tensor(reward, dtype=torch.float, device=device)
 
                 if is_training:
-                    memory.append(
-                        (state, action, new_state, reward, terminated)
-                    )
+                    memory.append((state, action, new_state, reward, terminated))
 
                     step_count += 1
 
@@ -93,16 +92,14 @@ class Toy_Agent:
 
                 if terminated:
                     break
-            
-            
 
             reward_per_ep.append(episode_reward)
-            epsilon = max(epsilon*self.epsilon_decay, self.epsilon_min)
+            epsilon = max(epsilon * self.epsilon_decay, self.epsilon_min)
             window = 100
             tail = reward_per_ep[-window:]
-            mean_reward = sum(tail)/len(tail)
-            
-# keep best
+            mean_reward = sum(tail) / len(tail)
+
+            # keep best
             if episode == 0:
                 best_mean = mean_reward
             else:
@@ -130,8 +127,12 @@ class Toy_Agent:
         # moving average
         window = min(100, len(reward_per_ep))
         if window > 1:
-            ma = np.convolve(reward_per_ep, np.ones(window)/window, mode="valid")
-            plt.plot(range(window-1, len(reward_per_ep)), ma, label=f"{window}-ep moving avg")
+            ma = np.convolve(reward_per_ep, np.ones(window) / window, mode="valid")
+            plt.plot(
+                range(window - 1, len(reward_per_ep)),
+                ma,
+                label=f"{window}-ep moving avg",
+            )
 
         plt.xlabel("Episode")
         plt.ylabel("Reward")
@@ -143,29 +144,34 @@ class Toy_Agent:
 
         print(f"Saved curve to {CURVE_PATH}")
 
-
-
     def optimize(self, batch, policy_dqn, target_dqn):
-                
-            states, actions, new_states, rewards, terminations = zip(*batch)
+        states, actions, new_states, rewards, terminations = zip(*batch)
 
-            states = torch.stack(states)
-            new_states = torch.stack(new_states)         
-            actions = torch.stack(actions)
-            rewards = torch.stack(rewards)
-            terminations = torch.tensor(terminations).float().to(device)
+        states = torch.stack(states)
+        new_states = torch.stack(new_states)
+        actions = torch.stack(actions)
+        rewards = torch.stack(rewards)
+        terminations = torch.tensor(terminations).float().to(device)
 
-            with torch.no_grad():
-                target_q = rewards + (1-terminations) * self.discount_factor_g * target_dqn(new_states).max(dim=1)[0]
+        with torch.no_grad():
+            target_q = (
+                rewards
+                + (1 - terminations)
+                * self.discount_factor_g
+                * target_dqn(new_states).max(dim=1)[0]
+            )
 
-            current_q = policy_dqn(states).gather(dim=1, index=actions.unsqueeze(dim=1)).squeeze()
-            
-            loss = self.loss_fn(current_q, target_q)
+        current_q = (
+            policy_dqn(states).gather(dim=1, index=actions.unsqueeze(dim=1)).squeeze()
+        )
 
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
+        loss = self.loss_fn(current_q, target_q)
 
-if __name__ == '__main__':
-    agent = Toy_Agent('toy-env')
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+
+if __name__ == "__main__":
+    agent = Toy_Agent("toy-env")
     agent.run(is_training=True, render=False)

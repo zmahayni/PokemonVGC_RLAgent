@@ -2,6 +2,8 @@ import numpy as np
 from poke_env.player import Player, RandomPlayer
 from poke_env.player.battle_order import BattleOrder
 
+import asyncio
+
 class GymBridgePlayer(Player):
     """
     A tiny Player that lets *you* choose the move by setting a pending action
@@ -9,13 +11,15 @@ class GymBridgePlayer(Player):
     """
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self._pending_action = None  # set by your gym env before a turn
+        self.pending_action = None  # set by your gym env before a turn
+        self.action_ready = asyncio.Event()
 
     # Your gym env calls this before advancing a turn
     def set_pending_action(self, action_idx: int):
-        self._pending_action = int(action_idx)
+        self.pending_action = int(action_idx)
+        self.action_ready.set()
 
-    def choose_move(self, battle):
+    async def choose_move(self, battle):
         """
         poke-env calls this every decision. We:
         1) Build a stable 4-slot move list from the active Pokémon
@@ -24,6 +28,8 @@ class GymBridgePlayer(Player):
         """
         # 1) Make a stable 4-slot view of the active's known moves
         #    (active_pokemon.moves is a dict of Move objects keyed by move id)
+        await self.action_ready.wait()
+
         known_moves = list(battle.active_pokemon.moves.values())  # may be < 4 early
         slots = [known_moves[i] if i < len(known_moves) else None for i in range(4)]
 
@@ -37,9 +43,10 @@ class GymBridgePlayer(Player):
             return any(m.id == am.id for am in battle.available_moves)
 
         # 2) If we have a pending action and it’s usable, play it
-        if self._pending_action is not None:
-            idx = int(self._pending_action)
-            self._pending_action = None  # consume it
+        if self.pending_action is not None:
+            idx = int(self.pending_action)
+            self.pending_action = None  # consume it
+            self.action_ready.clear()
             if 0 <= idx < 4 and usable(slots[idx]):
                 return self.create_order(slots[idx])
 

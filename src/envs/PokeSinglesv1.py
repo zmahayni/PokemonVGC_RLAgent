@@ -6,6 +6,7 @@ from .GymBridgePlayer import GymBridgePlayer
 from poke_env.ps_client.server_configuration import LocalhostServerConfiguration
 from poke_env.ps_client.account_configuration import AccountConfiguration
 import asyncio
+import threading
 
 # Format: gen9randombattle (both sides random; fixed team comes later in OU).
 
@@ -35,32 +36,74 @@ class PokeSinglesV1(gym.Env):
         self.agent = GymBridgePlayer(
             battle_format="gen9randombattle",
             server_configuration=LocalhostServerConfiguration,
-            account_configuration=AccountConfiguration.generate("agent_key", rand=True),
+            account_configuration=AccountConfiguration('Agent', None),
         )
         self.opponent = RandomPlayer(
             battle_format="gen9randombattle",
             server_configuration=LocalhostServerConfiguration,
-            account_configuration=AccountConfiguration.generate("opp_key", rand=True),
+            account_configuration=AccountConfiguration('Opp', None),
         )
+
+        self.loop = None
+        self.thread = None
+        self.start_loop_in_background()
+        future = asyncio.run_coroutine_threadsafe(asyncio.sleep(0.01), self.loop)
+
+        # block the main thread until that coroutine finishes
+        try:
+            result = future.result(timeout=1)   # should return None after 0.01s
+            print("✅ loop is alive, got result:", result)
+        except Exception as e:
+            print("❌ loop is not running:", e)
+
+
+    def start_loop_in_background(self):
+        if self.loop is not None:
+            return self.loop
+        self.loop = asyncio.new_event_loop()
+
+        def run_loop(loop):
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+        self.thread = threading.Thread(target=run_loop, args=(self.loop,), daemon=True)
+        self.thread.start()
+        return self.loop
+    
+    def submit(self, coro):
+        if self.loop is None:
+            raise RuntimeError('Event loop not started')
+        return asyncio.run_coroutine_threadsafe(coro, self.loop)
+    
+    def shutdown_loop(self):
+        if self.loop is not None:
+            self.loop.call_soon_threadsafe(self.loop.stop)
+            self.thread.join()
+            self.loop = None
+            self.thread = None
 
     def reset(self, seed=None, battle_format="gen9randombattle"):
         self.my_hp = 1
         self.opp_hp = 1
         self.turns = 0
-        asyncio.self.agent.battle_against(self.opponent, n_battles=1)
-        self.battle = list(self.agent.battles.values())[-1]
+        self.submit(self.agent.send_challenges())
+        self.submit(self.opponent.accept_challenges())
+        if self.agent.battles:
+            self.battle = self.battle = list(self.agent.battles.values())[-1]
         obs = self.embed_observation(self.battle)
         info = {}
 
         return obs, info
 
     def step(self, action):
+        t0 = self.battle.turn
         self.turns += 1
         mask = self.action_mask(self.battle)
         if not mask[action]:
             action = self.remap_action(mask, self.battle)
 
         self.agent.set_pending_action(action)
+        while not finished and self.battle.turn == t0:
+            time.sleep(0.02)
         terminated = self.battle.finished
         truncated = self.turns >= self.max_turns
         reward = 0.0

@@ -130,5 +130,6 @@ class PokeSinglesV1Agent:
 
   
 if __name__ == '__main__':
-    agent = PokeSinglesV1Agent('poke-singles-v1')
-    agent.run(is_training=True, render=False)
+    # agent = PokeSinglesV1Agent('poke-singles-v1')
+    # agent.run(is_training=True, render=False)
+    env = PokeSinglesV1()
