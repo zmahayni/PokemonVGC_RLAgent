@@ -7,6 +7,8 @@ from poke_env.ps_client.server_configuration import LocalhostServerConfiguration
 from poke_env.ps_client.account_configuration import AccountConfiguration
 import asyncio
 import threading
+import time
+import logging
 
 # Format: gen9randombattle (both sides random; fixed team comes later in OU).
 
@@ -17,6 +19,21 @@ import threading
 # Rewards: 0 per turn; +1 win, −1 loss; truncate at 50 turns → 0.
 
 # Mask: mark illegal move slots (no PP/disabled/empty/recharge) as not selectable; if the agent picks one, remap to the best legal.
+
+
+class NoTeraRandomPlayer(RandomPlayer):
+    async def choose_move(self, battle):
+        # 1) If a forced switch is required
+        if (not battle.available_moves) and battle.available_switches:
+            return self.create_order(np.random.choice(battle.available_switches))
+        
+        # 2) Otherwise, pick a legal move (never Tera)
+        if battle.available_moves:
+            move = np.random.choice(battle.available_moves)
+            return self.create_order(move, terastallize=False)
+        
+        # 3) Ultra edge case fallback
+        return await super().choose_move(battle)
 
 
 class PokeSinglesV1(gym.Env):
@@ -36,13 +53,16 @@ class PokeSinglesV1(gym.Env):
         self.agent = GymBridgePlayer(
             battle_format="gen9randombattle",
             server_configuration=LocalhostServerConfiguration,
-            account_configuration=AccountConfiguration('Agent', None),
+            account_configuration=AccountConfiguration("Agent", None),
         )
-        self.opponent = RandomPlayer(
+        self.opponent = NoTeraRandomPlayer(
             battle_format="gen9randombattle",
             server_configuration=LocalhostServerConfiguration,
-            account_configuration=AccountConfiguration('Opp', None),
+            account_configuration=AccountConfiguration("Opp", None),
         )
+
+        self.agent.logger.setLevel(logging.ERROR)
+        self.opponent.logger.setLevel(logging.ERROR)
 
         self.loop = None
         self.thread = None
@@ -51,11 +71,10 @@ class PokeSinglesV1(gym.Env):
 
         # block the main thread until that coroutine finishes
         try:
-            result = future.result(timeout=1)   # should return None after 0.01s
+            result = future.result(timeout=1)  # should return None after 0.01s
             print("✅ loop is alive, got result:", result)
         except Exception as e:
             print("❌ loop is not running:", e)
-
 
     def start_loop_in_background(self):
         if self.loop is not None:
@@ -65,15 +84,16 @@ class PokeSinglesV1(gym.Env):
         def run_loop(loop):
             asyncio.set_event_loop(loop)
             loop.run_forever()
+
         self.thread = threading.Thread(target=run_loop, args=(self.loop,), daemon=True)
         self.thread.start()
         return self.loop
-    
+
     def submit(self, coro):
         if self.loop is None:
-            raise RuntimeError('Event loop not started')
+            raise RuntimeError("Event loop not started")
         return asyncio.run_coroutine_threadsafe(coro, self.loop)
-    
+
     def shutdown_loop(self):
         if self.loop is not None:
             self.loop.call_soon_threadsafe(self.loop.stop)
@@ -85,10 +105,17 @@ class PokeSinglesV1(gym.Env):
         self.my_hp = 1
         self.opp_hp = 1
         self.turns = 0
-        self.submit(self.agent.send_challenges())
-        self.submit(self.opponent.accept_challenges())
-        if self.agent.battles:
-            self.battle = self.battle = list(self.agent.battles.values())[-1]
+        self.submit(self.agent.send_challenges(self.opponent.username, n_challenges=1))
+        self.submit(
+            self.opponent.accept_challenges(self.agent.username, n_challenges=1)
+        )
+        while not self.agent.battles:
+            time.sleep(0.005)
+        self.battle = list(self.agent.battles.values())[-1]
+
+        while not self.battle.active_pokemon:
+            time.sleep(0.005)
+
         obs = self.embed_observation(self.battle)
         info = {}
 
@@ -102,8 +129,8 @@ class PokeSinglesV1(gym.Env):
             action = self.remap_action(mask, self.battle)
 
         self.agent.set_pending_action(action)
-        while not finished and self.battle.turn == t0:
-            time.sleep(0.02)
+        while not self.battle.finished and self.battle.turn == t0:
+            time.sleep(0.005)
         terminated = self.battle.finished
         truncated = self.turns >= self.max_turns
         reward = 0.0
@@ -200,4 +227,3 @@ class PokeSinglesV1(gym.Env):
                 best_idx = k
 
         return best_idx
-

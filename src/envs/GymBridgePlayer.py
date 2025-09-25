@@ -28,6 +28,11 @@ class GymBridgePlayer(Player):
         """
         # 1) Make a stable 4-slot view of the active's known moves
         #    (active_pokemon.moves is a dict of Move objects keyed by move id)
+
+        if not battle.available_moves and battle.available_switches:
+            switch = battle.available_switches[-1]
+            return self.create_order(switch)
+    
         await self.action_ready.wait()
 
         known_moves = list(battle.active_pokemon.moves.values())  # may be < 4 early

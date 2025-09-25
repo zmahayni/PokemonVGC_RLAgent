@@ -34,7 +34,7 @@ class PokeSinglesV1Agent:
         self.optimizer = None
     
     def run(self, is_training=True, render=False):
-        env = PokeSinglesV1()
+        env = PokeSinglesV1(max_turns=15)
 
         num_states = env.observation_space.shape[0]
         num_actions = env.action_space.n
@@ -56,7 +56,7 @@ class PokeSinglesV1Agent:
 
             self.optimizer = torch.optim.Adam(policy_dqn.parameters(), lr=self.learning_rate_a)
 
-        for episode in range(10000):
+        for episode in range(200):
             state, _ = env.reset()
             state = torch.tensor(state, dtype=torch.float, device=device)
             episode_reward = 0.0
@@ -130,6 +130,7 @@ class PokeSinglesV1Agent:
 
   
 if __name__ == '__main__':
-    # agent = PokeSinglesV1Agent('poke-singles-v1')
-    # agent.run(is_training=True, render=False)
-    env = PokeSinglesV1()
+    agent = PokeSinglesV1Agent('poke-singles-v1')
+    agent.run(is_training=True, render=False)
+
+    
