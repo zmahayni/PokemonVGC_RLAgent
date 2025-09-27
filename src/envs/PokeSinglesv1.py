@@ -26,14 +26,14 @@ class NoTeraRandomPlayer(RandomPlayer):
         # 1) If a forced switch is required
         if (not battle.available_moves) and battle.available_switches:
             return self.create_order(np.random.choice(battle.available_switches))
-        
+
         # 2) Otherwise, pick a legal move (never Tera)
         if battle.available_moves:
             move = np.random.choice(battle.available_moves)
             return self.create_order(move, terastallize=False)
-        
+
         # 3) Ultra edge case fallback
-        return await super().choose_move(battle)
+        return self.choose_random_move(battle)
 
 
 class PokeSinglesV1(gym.Env):
