@@ -5,7 +5,7 @@ from gymnasium.spaces import Box
 class Singles_Env_v1(SinglesEnv):
     
     def __init__(self):
-        super().__init__(battle_format='gen8randombattle', save_replays=True, strict=True, accept_open_team_sheet=False)
+        super().__init__(battle_format='gen8randombattle', save_replays=False, strict=False, accept_open_team_sheet=False)
 
         #my_hp, opp_hp, 4base powers, 4type effectivness 4 accuracies -> shape is (14,)
         self.observation_spaces = {agent: Box(low=0.0, high=1.0, shape=(14,), dtype=np.float32) for agent in self.possible_agents}
@@ -23,6 +23,10 @@ class Singles_Env_v1(SinglesEnv):
             moves = battle.available_moves
         else:
             moves = list(battle.active_pokemon.moves.values())
+        
+        #bound to 4 moves just in case
+        if len(moves) > 4:
+            moves = moves[0:4]
 
         bp = np.zeros((4,), dtype=np.float32)
         #fill base powers
