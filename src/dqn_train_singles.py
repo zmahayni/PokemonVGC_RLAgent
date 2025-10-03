@@ -60,7 +60,7 @@ def evaluate(env, policy_dqn, n_episodes=10, max_steps=500, device="cpu"):
     policy_dqn.train()
     return avg_return, winrate
 
-class Agent:
+class DQN_Agent:
     def __init__(self, hyperparameter_set):
         with open("configs/hyperparameters.yml", "r") as file:
             all_hyperparameter_sets = yaml.safe_load(file)
@@ -235,6 +235,6 @@ class Agent:
 
 
 if __name__ == "__main__":
-    agent = Agent("singles-env")
+    agent = DQN_Agent("dqn-singles-env")
     agent.run(is_training=True, render=False)
 
