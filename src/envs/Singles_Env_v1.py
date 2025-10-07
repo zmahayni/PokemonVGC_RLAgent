@@ -4,14 +4,15 @@ from gymnasium.spaces import Box, Discrete
 
 
 class Singles_Env_v1(SinglesEnv):
-    def __init__(self):
+    def __init__(self, battle_format, team=None):
         super().__init__(
-            battle_format="gen9randombattle",
+            battle_format=battle_format,
             save_replays=False,
-            strict=True,
+            strict=False,
             fake=False,
             start_timer_on_battle_start=True,
             accept_open_team_sheet=False,
+            team=team
         )
 
         # my_hp, opp_hp, 4base powers, 4type effectivness 4 accuracies -> shape is (14,)

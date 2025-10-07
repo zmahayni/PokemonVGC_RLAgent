@@ -9,28 +9,29 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.callbacks import EvalCallback
 from sb3_contrib.common.wrappers import ActionMasker
 from sb3_contrib.ppo_mask import MaskablePPO
+from sb3_contrib.common.maskable.callbacks import MaskableEvalCallback
 
 from src.envs.Singles_Env_v1 import Singles_Env_v1
 from poke_env.player.baselines import RandomPlayer
 from poke_env.environment.single_agent_wrapper import SingleAgentWrapper
 from poke_env.environment.singles_env import SinglesEnv
+from poke_env.teambuilder.constant_teambuilder import ConstantTeambuilder
 from gymnasium import Env
 from typing import Any, Dict, Tuple
 from gymnasium.spaces import Discrete
 
+DEFAULT_RESERVED_INDEX = 0
 
 def map_orders_to_indices(valid_orders, battle):
     indices = []
     for order in valid_orders:
         idx_np = SinglesEnv.order_to_action(
-            order = order,
-            battle = battle,
-            fake = True,
-            strict = False
+            order=order, battle=battle, fake=True, strict=False
         )
         idx = int(idx_np)
         indices.append(idx)
     return indices
+
 
 def build_mask_from_battle(battle, act_size):
     """
@@ -46,7 +47,15 @@ def build_mask_from_battle(battle, act_size):
     if battle is None or battle.valid_orders is None or len(battle.valid_orders) == 0:
         return np.ones(act_size, dtype=bool)
 
-    # Map valid orders to action indices and set those to True
+    # Handle default-only turn: map '/choose default' to our reserved discrete index
+    vo = battle.valid_orders
+    if isinstance(vo, (list, tuple)) and len(vo) == 1 and str(vo[0]).strip() == "/choose default":
+        mask[:] = False
+        if 0 <= DEFAULT_RESERVED_INDEX < act_size:
+            mask[DEFAULT_RESERVED_INDEX] = True
+        return mask
+
+    # General case: map valid orders to indices 0..25
     indices = map_orders_to_indices(valid_orders=battle.valid_orders, battle=battle)
     for idx in indices:
         if 0 <= idx < act_size:
@@ -58,14 +67,64 @@ def build_mask_from_battle(battle, act_size):
 
     return mask
 
-    
+
 def mask_fn(env):
-    base_env = env
-    poke_env = base_env.env
-    act_size = base_env.action_space.n
-    battle = poke_env.battle1
+    base = env
+    while not isinstance(base, SingleAgentWrapper) and hasattr(base, "env"):
+        base = base.env
+
+    poke_env = base.env
+    act_size = base.action_space.n
+    battle = getattr(poke_env, "battle1", None)
     return build_mask_from_battle(battle=battle, act_size=act_size)
-            
+
+
+class DebugSingleAgentWrapper(SingleAgentWrapper):
+    def _debug_log(self, action):
+        # Underlying poke-env (Singles_Env_v1) is self.env
+        poke_env = self.env
+        act_size = self.action_space.n
+        battle = getattr(poke_env, "battle1", None)
+
+        # Build current mask for visibility
+        mask = build_mask_from_battle(battle, act_size)
+        allowed = [i for i, ok in enumerate(mask) if ok]
+        tag = (
+            getattr(battle, "battle_tag", "<no battle>")
+            if battle is not None
+            else "<no battle>"
+        )
+        turn = getattr(battle, "turn", -1) if battle is not None else -1
+        orders = None
+        if battle is not None and getattr(battle, "valid_orders", None) is not None:
+            try:
+                orders = [str(o) for o in battle.valid_orders]
+            except Exception:
+                orders = None
+        print(
+            f"[DEBUG] {tag} turn {turn} action={action} allowed={allowed} valid_orders={orders}"
+        )
+
+    def step(self, action):
+        self._debug_log(action)
+
+        # Translate reserved default index to -2 only if default is the sole valid order
+        poke_env = self.env
+        battle = getattr(poke_env, "battle1", None)
+        vo = None if battle is None else getattr(battle, "valid_orders", None)
+        if (
+            vo is not None
+            and isinstance(vo, (list, tuple))
+            and len(vo) == 1
+            and str(vo[0]).strip() == "/choose default"
+            and int(action) == int(DEFAULT_RESERVED_INDEX)
+        ):
+            action = np.int64(-2)
+
+        return super().step(action)
+
+    def reset(self, *, seed=None, options=None):
+        return super().reset(seed=seed, options=options)
 
 if __name__ == "__main__":
     # 1) Load config
@@ -85,17 +144,33 @@ if __name__ == "__main__":
     n_envs = int(cfg.get("n_envs", 1))
     seed = int(cfg.get("seed", 0))
 
+    # Load OU teams (Showdown export text files)
+    teams_dir = cfg.get("teams_dir", "teams")
+    agent_team_path = cfg.get("agent_team_path", os.path.join(teams_dir, "agent_ou.txt"))
+    opponent_team_path = cfg.get("opponent_team_path", os.path.join(teams_dir, "opponent_ou.txt"))
+    with open(agent_team_path, "r", encoding="utf-8") as f:
+        agent_team_str = f.read()
+    with open(opponent_team_path, "r", encoding="utf-8") as f:
+        opponent_team_str = f.read()
+
     # 4) Build train env (DummyVecEnv with a factory callable)
     def make_env():
-        agent = Singles_Env_v1()
-        opponent = RandomPlayer()
-        base_env = SingleAgentWrapper(env=agent, opponent=opponent)
-        masked_env = ActionMasker(base_env, mask_fn)
-
+        agent = Singles_Env_v1(
+            battle_format="gen9ou",
+            team=ConstantTeambuilder(agent_team_str),
+        )
+        opponent = RandomPlayer(
+            battle_format="gen9ou",
+            team=ConstantTeambuilder(opponent_team_str),
+        )
+        debug_env = SingleAgentWrapper(env=agent, opponent=opponent)
+        masked_env = ActionMasker(debug_env, mask_fn)
         return masked_env
-        
-    train_env = make_vec_env(make_env, n_envs=n_envs, seed=seed, vec_env_cls=DummyVecEnv)
-    eval_env  = make_vec_env(make_env, n_envs=1,     seed=seed+10, vec_env_cls=DummyVecEnv)
+
+    train_env = make_vec_env(
+        make_env, n_envs=n_envs, seed=seed, vec_env_cls=DummyVecEnv
+    )
+    eval_env = make_vec_env(make_env, n_envs=1, seed=seed + 10, vec_env_cls=DummyVecEnv)
 
     # 6) Policy kwargs (activation + net_arch)
     act = str(cfg.get("activation_fn", "relu")).lower()
@@ -132,7 +207,7 @@ if __name__ == "__main__":
     )
 
     # 8) Evaluation callback
-    eval_cb = EvalCallback(
+    eval_cb = MaskableEvalCallback(
         eval_env,
         best_model_save_path=best_dir,
         log_path=out_dir,
