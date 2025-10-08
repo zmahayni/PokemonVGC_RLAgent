@@ -1,6 +1,8 @@
 import numpy as np
 from poke_env.environment.single_agent_wrapper import SingleAgentWrapper
 from poke_env.environment.singles_env import SinglesEnv
+from poke_env.environment.doubles_env import DoublesEnv
+from gymnasium.spaces import Discrete, MultiDiscrete
 
 DEFAULT_RESERVED_INDEX = 0
 
@@ -56,9 +58,20 @@ def mask_fn(env):
         base = base.env
 
     poke_env = base.env
-    act_size = base.action_space.n
     battle = getattr(poke_env, "battle1", None)
-    return build_mask_from_battle(battle=battle, act_size=act_size)
+
+    # Singles (Discrete) -> boolean mask for MaskablePPO
+    if isinstance(base.action_space, Discrete):
+        act_size = base.action_space.n
+        return build_mask_from_battle(battle=battle, act_size=act_size)
+
+    # Doubles (MultiDiscrete) -> return per-position allowed values (not a boolean mask)
+    if isinstance(base.action_space, MultiDiscrete):
+        # Not used by MaskablePPO (unsupported), but useful for debugging or custom policies
+        return build_allowed_values_doubles(battle)
+
+    # Fallback
+    return None
 
 
 class DebugSingleAgentWrapper(SingleAgentWrapper):
@@ -103,6 +116,78 @@ class DebugSingleAgentWrapper(SingleAgentWrapper):
         ):
             action = np.int64(-2)
 
+        return super().step(action)
+
+    def reset(self, *, seed=None, options=None):
+        return super().reset(seed=seed, options=options)
+
+
+# ===================== Doubles helpers (MultiDiscrete) =====================
+
+def build_allowed_values_doubles(battle):
+    """
+    Return allowed action values for each position in a doubles turn.
+    Values can include special tokens: -2 (default), -1 (forfeit), 0 (pass),
+    1..6 (switch), and move/gimmick ranges as defined in DoublesEnv.
+
+    Output: (allowed_pos0, allowed_pos1), each a list[int]. If battle/valid_orders
+    is unavailable, return ([], []).
+    """
+    if battle is None:
+        return [], []
+
+    # valid_orders is expected to be a sequence per position
+    try:
+        vo0 = battle.valid_orders[0] if len(battle.valid_orders) > 0 else []
+        vo1 = battle.valid_orders[1] if len(battle.valid_orders) > 1 else []
+    except Exception:
+        return [], []
+
+    def map_individual_orders(orders, pos):
+        vals = []
+        for o in orders or []:
+            try:
+                # Use poke-env private helper to convert single-position orders
+                v = DoublesEnv._order_to_action_individual(o, battle, True, pos)  # type: ignore
+                vals.append(int(v))
+            except Exception:
+                # Fallback: best-effort via full order mapping if needed
+                pass
+        # Safety: ensure at least something is available
+        if not vals:
+            # Allow default as a last resort
+            vals.append(-2)
+        return sorted(list(set(vals)))
+
+    return map_individual_orders(vo0, 0), map_individual_orders(vo1, 1)
+
+
+class DebugDoubleAgentWrapper(SingleAgentWrapper):
+    """Debug wrapper for doubles to print per-position allowed values."""
+
+    def _debug_log(self, action):
+        poke_env = self.env
+        battle = getattr(poke_env, "battle1", None)
+        allowed0, allowed1 = build_allowed_values_doubles(battle)
+        tag = (
+            getattr(battle, "battle_tag", "<no battle>")
+            if battle is not None
+            else "<no battle>"
+        )
+        turn = getattr(battle, "turn", -1) if battle is not None else -1
+        orders0 = orders1 = None
+        try:
+            orders0 = [str(o) for o in battle.valid_orders[0]] if battle and battle.valid_orders else None
+            orders1 = [str(o) for o in battle.valid_orders[1]] if battle and battle.valid_orders else None
+        except Exception:
+            pass
+        print(
+            f"[DEBUG-DOUBLES] {tag} turn {turn} action={action} allowed0={allowed0} allowed1={allowed1} "
+            f"valid_orders0={orders0} valid_orders1={orders1}"
+        )
+
+    def step(self, action):
+        self._debug_log(action)
         return super().step(action)
 
     def reset(self, *, seed=None, options=None):

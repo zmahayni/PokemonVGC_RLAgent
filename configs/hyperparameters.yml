@@ -57,3 +57,42 @@ ppo-singles-env:
   # Misc
   seed: 0
   tensorboard_log_dir: runs/ppo_singles
+
+ppo-doubles-env:
+  # Training duration
+  total_timesteps: 500000
+
+  # Evaluation
+  eval_episodes: 100
+  eval_freq_steps: 10000
+
+  # Vec envs
+  n_envs: 1
+
+  # Optimizer / rollout
+  learning_rate: 0.0003
+  n_steps: 1024
+  batch_size: 256
+  n_epochs: 10
+
+  # Credit assignment
+  gamma: 0.995
+  gae_lambda: 0.95
+
+  # Policy update
+  clip_range: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  target_kl: 0.02
+
+  # Network
+  net_arch:
+    pi: [128, 128]
+    vf: [128, 128]
+  activation_fn: relu
+
+  # Misc
+  seed: 0
+  tensorboard_log_dir: runs/ppo_doubles
+
