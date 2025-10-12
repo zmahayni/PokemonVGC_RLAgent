@@ -5,12 +5,69 @@ import yaml
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import DummyVecEnv
-from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.evaluation import evaluate_policy
 
 from src.envs.Doubles_Env_v1 import Doubles_Env_v1
 from poke_env.player.baselines import RandomPlayer
-from poke_env.environment.single_agent_wrapper import SingleAgentWrapper
 from poke_env.teambuilder.constant_teambuilder import ConstantTeambuilder
+from src.sb3_action_mappingSingles import ProjectingDoubleAgentWrapper
+
+class FreshEvalCallback(BaseCallback):
+    """Recreate a fresh eval env each eval cycle to avoid reset conflicts in poke-env.
+    Saves the best model based on mean reward.
+    """
+
+    def __init__(
+        self,
+        eval_env_factory,
+        eval_freq: int,
+        n_eval_episodes: int,
+        best_model_save_path: str,
+        deterministic: bool = True,
+        verbose: int = 0,
+    ):
+        super().__init__(verbose)
+        self.eval_env_factory = eval_env_factory
+        self.eval_freq = int(max(1, eval_freq))
+        self.n_eval_episodes = int(max(1, n_eval_episodes))
+        self.best_model_save_path = best_model_save_path
+        self.deterministic = deterministic
+        self.last_eval_step = 0
+        self.best_mean_reward = None
+
+    def _on_step(self) -> bool:
+        if (self.num_timesteps - self.last_eval_step) < self.eval_freq:
+            return True
+        self.last_eval_step = self.num_timesteps
+
+        # Build a fresh eval env, evaluate, then close it
+        eval_env = None
+        try:
+            eval_env = self.eval_env_factory()
+            mean_reward, _ = evaluate_policy(
+                self.model,
+                eval_env,
+                n_eval_episodes=self.n_eval_episodes,
+                deterministic=self.deterministic,
+                render=False,
+                warn=False,
+            )
+            if self.verbose:
+                print(f"[Eval] step={self.num_timesteps} mean_reward={mean_reward:.4f}")
+            if self.best_mean_reward is None or mean_reward > self.best_mean_reward:
+                self.best_mean_reward = mean_reward
+                self.model.save(os.path.join(self.best_model_save_path, "best_model.zip"))
+        except Exception as e:
+            if self.verbose:
+                print(f"[Eval] error during evaluation: {e}")
+        finally:
+            try:
+                if eval_env is not None:
+                    eval_env.close()
+            except Exception:
+                pass
+        return True
 
 # Note: sb3-contrib MaskablePPO does not support MultiDiscrete action spaces used by DoublesEnv.
 # This boilerplate uses standard PPO (SB3) without action masking.
@@ -52,11 +109,13 @@ if __name__ == "__main__":
             battle_format=cfg.get("battle_format", "gen9vgc2025regi"),
             team=ConstantTeambuilder(opponent_team_str),
         )
-        env = SingleAgentWrapper(env=agent, opponent=opponent)
+        env = ProjectingDoubleAgentWrapper(env=agent, opponent=opponent)
         return env
 
     train_env = make_vec_env(make_env, n_envs=n_envs, seed=seed, vec_env_cls=DummyVecEnv)
-    eval_env = make_vec_env(make_env, n_envs=1, seed=seed + 10, vec_env_cls=DummyVecEnv)
+    # Factory to create a fresh eval env each time
+    def make_eval_env():
+        return make_vec_env(make_env, n_envs=1, seed=seed + 10, vec_env_cls=DummyVecEnv)
 
     # 5) Policy kwargs (activation + net_arch)
     act = str(cfg.get("activation_fn", "relu")).lower()
@@ -64,7 +123,6 @@ if __name__ == "__main__":
         from torch.nn import Tanh as ACT
     else:
         from torch.nn import ReLU as ACT  # default
-
     policy_kwargs = {
         "net_arch": cfg.get("net_arch", {"pi": [256, 256], "vf": [256, 256]}),
         "activation_fn": ACT,
@@ -92,15 +150,14 @@ if __name__ == "__main__":
         verbose=1,
     )
 
-    # 7) Evaluation callback
-    eval_cb = EvalCallback(
-        eval_env,
-        best_model_save_path=best_dir,
-        log_path=out_dir,
+    # 7) Evaluation callback (fresh env each time)
+    eval_cb = FreshEvalCallback(
+        eval_env_factory=make_eval_env,
         eval_freq=eval_freq_steps,
         n_eval_episodes=eval_episodes,
+        best_model_save_path=best_dir,
         deterministic=True,
-        render=False,
+        verbose=1,
     )
 
     # 8) Train and save
@@ -111,7 +168,6 @@ if __name__ == "__main__":
 
     # 9) Cleanup
     train_env.close()
-    eval_env.close()
 
     print(
         f"Training complete. Final model: {final_path}\n"

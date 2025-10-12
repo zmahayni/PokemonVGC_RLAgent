@@ -3,6 +3,7 @@ from poke_env.environment.single_agent_wrapper import SingleAgentWrapper
 from poke_env.environment.singles_env import SinglesEnv
 from poke_env.environment.doubles_env import DoublesEnv
 from gymnasium.spaces import Discrete, MultiDiscrete
+from poke_env.player.battle_order import DoubleBattleOrder
 
 DEFAULT_RESERVED_INDEX = 0
 
@@ -122,8 +123,6 @@ class DebugSingleAgentWrapper(SingleAgentWrapper):
         return super().reset(seed=seed, options=options)
 
 
-# ===================== Doubles helpers (MultiDiscrete) =====================
-
 def build_allowed_values_doubles(battle):
     """
     Return allowed action values for each position in a doubles turn.
@@ -147,19 +146,62 @@ def build_allowed_values_doubles(battle):
         vals = []
         for o in orders or []:
             try:
-                # Use poke-env private helper to convert single-position orders
+                # Use poke-env helper to convert single-position orders
                 v = DoublesEnv._order_to_action_individual(o, battle, True, pos)  # type: ignore
                 vals.append(int(v))
             except Exception:
-                # Fallback: best-effort via full order mapping if needed
                 pass
-        # Safety: ensure at least something is available
         if not vals:
-            # Allow default as a last resort
             vals.append(-2)
         return sorted(list(set(vals)))
 
     return map_individual_orders(vo0, 0), map_individual_orders(vo1, 1)
+
+
+class ProjectingDoubleAgentWrapper(SingleAgentWrapper):
+    """
+    For MultiDiscrete doubles actions: always execute a joint-legal pair by
+    enumerating per-slot valid orders and filtering with DoubleBattleOrder.join_orders.
+    This guarantees joint legality (no incompatible pair will be executed).
+    """
+
+    def step(self, action):
+        # Build a joint-legal action array [a0, a1] from current valid_orders
+        battle = getattr(self.env, "battle1", None)
+        if (
+            battle is None
+            or getattr(battle, "finished", False)
+            or getattr(battle, "valid_orders", None) is None
+        ):
+            return super().step(action)
+
+        try:
+            vo0 = battle.valid_orders[0] if len(battle.valid_orders) > 0 else []
+            vo1 = battle.valid_orders[1] if len(battle.valid_orders) > 1 else []
+        except Exception:
+            vo0, vo1 = [], []
+
+        joint_legal_actions = []
+        if vo0 and vo1:
+            for o0 in vo0:
+                for o1 in vo1:
+                    try:
+                        joined = DoubleBattleOrder.join_orders([o0], [o1])
+                        if joined:
+                            arr = DoublesEnv.order_to_action(joined[0], battle, fake=True, strict=False)
+                            if isinstance(arr, np.ndarray) and arr.shape[0] == 2:
+                                joint_legal_actions.append(arr)
+                    except Exception:
+                        continue
+
+        # Fallbacks
+        if not joint_legal_actions:
+            # If no joint-legal pair found, pass through original (poke-env may default to random)
+            return super().step(action)
+
+        # Choose a joint-legal action to execute. Simple policy: random choice.
+        chosen = joint_legal_actions[np.random.randint(len(joint_legal_actions))]
+        return super().step(chosen)
 
 
 class DebugDoubleAgentWrapper(SingleAgentWrapper):

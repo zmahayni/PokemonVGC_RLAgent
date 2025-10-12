@@ -31,6 +31,9 @@ ppo-singles-env:
   # Vec envs
   n_envs: 1
 
+  # Format
+  battle_format: gen9vgc2025regi
+
   # Optimizer / rollout
   learning_rate: 0.0003
   n_steps: 1024
@@ -60,7 +63,7 @@ ppo-singles-env:
 
 ppo-doubles-env:
   # Training duration
-  total_timesteps: 500000
+  total_timesteps: 1000000
 
   # Evaluation
   eval_episodes: 100
