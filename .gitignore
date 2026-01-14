@@ -1,3 +1,5 @@
 venv/
-poke-env/
-pokemon-showdown/
+poke-env
+pokemon-showdown
+.claude/
+logs/

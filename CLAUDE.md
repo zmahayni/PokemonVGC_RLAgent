@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Reinforcement Learning research project for Pokemon VGC (Video Game Championships) Doubles battles. Focus is on building reliable environments and experimenting with different RL approaches, eventually creating an agent that can play decently. 
 
+You are to serve as a research partner
+
 **Stack:** Stable Baselines3, poke-env, Pokemon Showdown, PyTorch, Gymnasium
 
 ## Common Commands
@@ -19,6 +21,7 @@ python src/explore/test_connection.py      # Test server connectivity
 python src/explore/explore_battle_state.py # Explore DoubleBattle state
 python src/explore/explore_actions.py      # Explore action space encoding
 ```
+Always go into venv before running python commands
 
 ## Project Structure
 
