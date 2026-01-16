@@ -138,19 +138,22 @@ def get_action_mask(battle: DoubleBattle) -> npt.NDArray[np.bool_]:
     joint_legal = DoubleBattleOrder.join_orders(valid_orders_0, valid_orders_1)
 
     # Convert each joint-legal order to action pair
+    failed_conversions = []
     for double_order in joint_legal:
         try:
             action = DoublesEnv.order_to_action(double_order, battle, fake=True)
             a0, a1 = action[0], action[1]
             if 0 <= a0 < ACTION_SPACE_SIZE and 0 <= a1 < ACTION_SPACE_SIZE:
                 mask[a0, a1] = True
-        except (ValueError, IndexError):
-            pass
+            else:
+                failed_conversions.append(f"Out of range: {double_order} -> ({a0}, {a1})")
+        except (ValueError, IndexError) as e:
+            failed_conversions.append(f"Exception for {double_order}: {e}")
 
     return mask
 
 
-def get_action_mask_flat(battle: DoubleBattle) -> npt.NDArray[np.bool_]:
+def get_action_mask_flat(battle: DoubleBattle, debug: bool = False) -> npt.NDArray[np.bool_]:
     """
     Get the joint-action mask as a flattened 1D array.
 
@@ -161,12 +164,38 @@ def get_action_mask_flat(battle: DoubleBattle) -> npt.NDArray[np.bool_]:
 
     Args:
         battle: Current battle state
+        debug: If True, print debug information
 
     Returns:
         Boolean array of shape (107*107,) = (11449,)
     """
+    # If battle is finished, return all-valid mask (action won't matter)
+    if battle.finished:
+        return np.ones(ACTION_SPACE_SIZE * ACTION_SPACE_SIZE, dtype=bool)
+
     mask_2d = get_action_mask(battle)
-    return mask_2d.flatten()
+    flat_mask = mask_2d.flatten()
+
+    # Safeguard: if no valid actions, allow all actions
+    # This prevents MaskablePPO from crashing. The environment will handle
+    # invalid actions gracefully by falling back to random valid moves.
+    if not flat_mask.any():
+        print("\n" + "="*60, flush=True)
+        print("WARNING: NO VALID ACTIONS IN MASK - allowing all actions", flush=True)
+        print(f"Battle tag: {battle.battle_tag}", flush=True)
+        print(f"Turn: {battle.turn}, Finished: {battle.finished}", flush=True)
+        print(f"Force switch: {battle.force_switch}", flush=True)
+        print(f"Active pokemon: {[p.species if p else None for p in battle.active_pokemon]}", flush=True)
+        print(f"Valid orders[0]: {len(battle.valid_orders[0])}", flush=True)
+        print(f"Valid orders[1]: {len(battle.valid_orders[1])}", flush=True)
+        print("="*60 + "\n", flush=True)
+        return np.ones(ACTION_SPACE_SIZE * ACTION_SPACE_SIZE, dtype=bool)
+
+    if debug:
+        num_valid = flat_mask.sum()
+        print(f"\n[DEBUG MASK] Turn {battle.turn}, Valid actions: {num_valid}/{len(flat_mask)}", flush=True)
+
+    return flat_mask
 
 
 def action_pair_to_flat(a0: int, a1: int) -> int:

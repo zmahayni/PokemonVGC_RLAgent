@@ -19,20 +19,16 @@ The trained model will be saved to models/vgc_ppo_vs_random.zip
 
 import sys
 import os
-import logging
 from pathlib import Path
 from datetime import datetime
-
-# Add project root to path
-PROJECT_ROOT = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(PROJECT_ROOT / "poke-env" / "src"))
-
-# CRITICAL: Disable ALL logging below CRITICAL level globally
-# This is the most aggressive way to suppress poke-env's verbose logging
-logging.disable(logging.WARNING)
-
 import numpy as np
+import torch
+
+# Disable PyTorch distribution validation to avoid numerical precision errors
+# when action masking creates extreme logit values. This is a known issue with
+# MaskablePPO when the action space is very large (11449 actions).
+torch.distributions.Distribution.set_default_validate_args(False)
+
 from stable_baselines3.common.callbacks import (
     BaseCallback,
     CheckpointCallback,
@@ -40,12 +36,42 @@ from stable_baselines3.common.callbacks import (
 )
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
+import gymnasium as gym
+
 from tqdm import tqdm
+
+# Add project root to path
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT / "poke-env" / "src"))
+
+from src.envs import VGCEnv
+
+
+class ActionMaskWrapper(gym.Wrapper):
+    """
+    Wrapper that preserves the action_masks() method for MaskablePPO.
+
+    Monitor wrapper doesn't forward action_masks(), which breaks MaskablePPO.
+    This wrapper ensures action_masks() is accessible at the top level.
+    """
+
+    _debug_counter = 0
+
+    def action_masks(self):
+        """Forward action_masks() to the underlying VGCEnv."""
+        mask = self.unwrapped.action_masks()
+        # Debug: print mask stats occasionally
+        ActionMaskWrapper._debug_counter += 1
+        if ActionMaskWrapper._debug_counter <= 3 or ActionMaskWrapper._debug_counter % 500 == 0:
+            num_valid = mask.sum()
+            print(f"[Mask] Call #{ActionMaskWrapper._debug_counter}: {num_valid} valid", flush=True)
+        return mask
+
 
 # Try to import MaskablePPO from sb3-contrib
 try:
     from sb3_contrib import MaskablePPO
-    from sb3_contrib.common.wrappers import ActionMasker
     HAS_MASKABLE_PPO = True
 except ImportError:
     print("Warning: sb3-contrib not installed. Install with: pip install sb3-contrib")
@@ -53,7 +79,7 @@ except ImportError:
     from stable_baselines3 import PPO
     HAS_MASKABLE_PPO = False
 
-from src.envs import VGCEnv
+
 
 
 # Configuration
@@ -76,16 +102,6 @@ CONFIG = {
     "log_dir": PROJECT_ROOT / "logs",
     "model_dir": PROJECT_ROOT / "models",
 }
-
-
-def get_action_mask(env: VGCEnv) -> np.ndarray:
-    """
-    Get action mask from environment for MaskablePPO.
-
-    Returns shape (214,) = (107 + 107) for MultiDiscrete([107, 107]).
-    First 107 values are mask for position 0, next 107 for position 1.
-    """
-    return env.action_masks()
 
 
 class ProgressCallback(BaseCallback):
@@ -146,42 +162,18 @@ class ProgressCallback(BaseCallback):
 
 
 def make_env(config: dict):
-    """Create a VGC environment."""
+    """Create a VGC environment with action masking support."""
     def _init():
         env = VGCEnv(
             battle_format=config["battle_format"],
             team_path=config["team_path"],
         )
-        return Monitor(env)
+        env = Monitor(env)
+        env = ActionMaskWrapper(env)
+        return env
     return _init
 
 
-def setup_logging(log_dir: Path, run_name: str):
-    """Configure logging to file only (console is disabled globally)."""
-    log_file = log_dir / f"{run_name}.log"
-
-    # Re-enable logging for file output only
-    logging.disable(logging.NOTSET)  # Re-enable logging
-
-    # Create file handler for all logs
-    file_handler = logging.FileHandler(log_file)
-    file_handler.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(formatter)
-
-    # Configure root logger with file handler only (no console)
-    root_logger = logging.getLogger()
-    root_logger.handlers = []  # Remove all handlers
-    root_logger.addHandler(file_handler)
-    root_logger.setLevel(logging.DEBUG)
-
-    # Disable console output by setting high level for StreamHandlers
-    # that might be added later by poke-env
-    for handler in logging.root.handlers:
-        if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
-            handler.setLevel(logging.CRITICAL)
-
-    return log_file
 
 
 def train():
@@ -198,29 +190,22 @@ def train():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_name = f"vgc_ppo_{timestamp}"
 
-    # Setup logging to file only BEFORE creating environment
-    log_file = setup_logging(CONFIG["log_dir"], run_name)
-
     print(f"\nConfiguration:")
     print(f"  Format: {CONFIG['battle_format']}")
     print(f"  Team: {CONFIG['team_path']}")
     print(f"  Total timesteps: {CONFIG['total_timesteps']:,}")
     print(f"  Using MaskablePPO: {HAS_MASKABLE_PPO}")
-    print(f"  Log file: {log_file}")
     print()
 
-    # Create environment (logging already configured)
     print("Creating environment...")
     env = VGCEnv(
         battle_format=CONFIG["battle_format"],
         team_path=CONFIG["team_path"],
     )
-
-    # Wrap with action masker if using MaskablePPO
-    if HAS_MASKABLE_PPO:
-        env = ActionMasker(env, get_action_mask)
-
+    # Wrap with Monitor for episode stats, then ActionMaskWrapper to preserve action_masks()
+    # Order matters: ActionMaskWrapper must be outermost so MaskablePPO can find action_masks()
     env = Monitor(env)
+    env = ActionMaskWrapper(env)
 
     # Create model (verbose=0 to reduce output)
     print("Creating model...")

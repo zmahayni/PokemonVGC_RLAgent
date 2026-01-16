@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Reinforcement Learning research project for Pokemon VGC (Video Game Championships) Doubles battles. Focus is on building reliable environments and experimenting with different RL approaches, eventually creating an agent that can play decently. 
+Reinforcement Learning research project for Pokemon VGC (Video Game Championships) Doubles battles. Focus is on building reliable environments and experimenting with different RL approaches, eventually creating an agent that can play decently. The current plan is to have it be good with one team, and have it play games against other meta teams, then having it play against me. Eventually, it will be put on the official ladder. 
 
-You are to serve as a research partner
+You are to serve as a research partner. Whenever we make a plan together, put that document in a folder called plans and include the date. Don't put (Recommended) when giving options in plan mode, just put the options themselves.
 
 **Stack:** Stable Baselines3, poke-env, Pokemon Showdown, PyTorch, Gymnasium
 
