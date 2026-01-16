@@ -493,15 +493,91 @@ async def run_vs_random(model_type: str, model_path: Path, n_battles: int = 100)
     return {"model_wins": model_wins, "random_wins": random_wins, "total": n_battles}
 
 
+async def run_v2_vs_v1(v2_model_path: Path, v1_model_path: Path, n_battles: int = 100):
+    """Run battles between V2 model and V1 (discrete) model."""
+    print("=" * 60)
+    print("V2 Model vs V1 Model Evaluation")
+    print("=" * 60)
+    print(f"\nV2 Model (86-dim obs): {v2_model_path.name}")
+    print(f"V1 Model (64-dim obs): {v1_model_path.name}")
+    print(f"Number of battles: {n_battles}")
+    print()
+
+    if not v2_model_path.exists():
+        print(f"Error: V2 model not found at {v2_model_path}")
+        return
+    if not v1_model_path.exists():
+        print(f"Error: V1 model not found at {v1_model_path}")
+        return
+
+    print("Loading models...")
+    v2_player = V2ModelPlayer(v2_model_path)
+    v1_player = DiscreteModelPlayer(v1_model_path)
+
+    print(f"\nStarting {n_battles} battles...")
+    print("-" * 60)
+
+    await v2_player.battle_against(v1_player, n_battles=n_battles)
+
+    v2_wins = v2_player.n_won_battles
+    v1_wins = v1_player.n_won_battles
+
+    print("\n" + "=" * 60)
+    print("RESULTS")
+    print("=" * 60)
+    print(f"V2 Model (86-dim obs) wins: {v2_wins}/{n_battles} ({100*v2_wins/n_battles:.1f}%)")
+    print(f"V1 Model (64-dim obs) wins: {v1_wins}/{n_battles} ({100*v1_wins/n_battles:.1f}%)")
+    print("=" * 60)
+
+    return {"v2_wins": v2_wins, "v1_wins": v1_wins, "total": n_battles}
+
+
+async def run_v2_vs_random(v2_model_path: Path, n_battles: int = 100):
+    """Run battles between V2 model and random player."""
+    print("=" * 60)
+    print("V2 Model vs Random Evaluation")
+    print("=" * 60)
+    print(f"\nV2 Model: {v2_model_path.name}")
+    print(f"Number of battles: {n_battles}")
+    print()
+
+    if not v2_model_path.exists():
+        print(f"Error: V2 model not found at {v2_model_path}")
+        return
+
+    print("Loading model...")
+    v2_player = V2ModelPlayer(v2_model_path)
+    random_player = RandomPlayer()
+
+    print(f"\nStarting {n_battles} battles...")
+    print("-" * 60)
+
+    await v2_player.battle_against(random_player, n_battles=n_battles)
+
+    v2_wins = v2_player.n_won_battles
+    random_wins = random_player.n_won_battles
+
+    print("\n" + "=" * 60)
+    print("RESULTS")
+    print("=" * 60)
+    print(f"V2 Model wins:  {v2_wins}/{n_battles} ({100*v2_wins/n_battles:.1f}%)")
+    print(f"Random wins:    {random_wins}/{n_battles} ({100*random_wins/n_battles:.1f}%)")
+    print("=" * 60)
+
+    return {"v2_wins": v2_wins, "random_wins": random_wins, "total": n_battles}
+
+
 def main():
     """Main entry point."""
     import argparse
     parser = argparse.ArgumentParser(description="Evaluate trained models")
     parser.add_argument("--battles", "-n", type=int, default=100, help="Number of battles to run")
-    parser.add_argument("--discrete-model", type=str, default=None, help="Path to discrete model")
+    parser.add_argument("--discrete-model", type=str, default=None, help="Path to discrete (v1) model")
     parser.add_argument("--multidiscrete-model", type=str, default=None, help="Path to multidiscrete model")
-    parser.add_argument("--vs-random", choices=["discrete", "multidiscrete"], default=None,
+    parser.add_argument("--v2-model", type=str, default=None, help="Path to V2 model (86-dim obs)")
+    parser.add_argument("--vs-random", choices=["discrete", "multidiscrete", "v2"], default=None,
                         help="Run specified model against random instead of model vs model")
+    parser.add_argument("--v2-vs-v1", action="store_true", help="Compare V2 model against V1 discrete model")
     args = parser.parse_args()
 
     # Override model paths if provided
@@ -512,9 +588,21 @@ def main():
         MULTIDISCRETE_MODEL_PATH = Path(args.multidiscrete_model)
 
     # Run evaluation
-    if args.vs_random:
-        model_path = DISCRETE_MODEL_PATH if args.vs_random == "discrete" else MULTIDISCRETE_MODEL_PATH
-        asyncio.run(run_vs_random(args.vs_random, model_path, n_battles=args.battles))
+    if args.v2_vs_v1:
+        if not args.v2_model:
+            print("Error: --v2-model required for --v2-vs-v1")
+            return
+        v2_path = Path(args.v2_model)
+        asyncio.run(run_v2_vs_v1(v2_path, DISCRETE_MODEL_PATH, n_battles=args.battles))
+    elif args.vs_random:
+        if args.vs_random == "v2":
+            if not args.v2_model:
+                print("Error: --v2-model required for --vs-random v2")
+                return
+            asyncio.run(run_v2_vs_random(Path(args.v2_model), n_battles=args.battles))
+        else:
+            model_path = DISCRETE_MODEL_PATH if args.vs_random == "discrete" else MULTIDISCRETE_MODEL_PATH
+            asyncio.run(run_vs_random(args.vs_random, model_path, n_battles=args.battles))
     else:
         asyncio.run(run_battles(n_battles=args.battles))
 

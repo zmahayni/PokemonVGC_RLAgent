@@ -63,7 +63,7 @@ Tera Type: Grass
 EVs: 4 HP / 252 SpA / 252 Spe  
 Timid Nature  
 IVs: 0 Atk  
-- Meteor Beam  
-- Sludge Bomb  
-- Earth Power  
-- Spiky Shield  
+- Meteor Beam
+- Sludge Bomb
+- Earth Power
+- Spiky Shield

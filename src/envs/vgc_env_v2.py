@@ -26,10 +26,20 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "poke-env" / "src")
 
 from poke_env.battle.double_battle import DoubleBattle
 from poke_env.battle.field import Field
+from poke_env.battle.move import Move
+from poke_env.battle.move_category import MoveCategory
+from poke_env.battle.pokemon import Pokemon
+from poke_env.battle.target import Target
 from poke_env.environment.doubles_env import DoublesEnv
 from poke_env.player import Player
-from poke_env.player.battle_order import BattleOrder
-from poke_env.ps_client import AccountConfiguration, LocalhostServerConfiguration
+from poke_env.player.battle_order import (
+    BattleOrder,
+    DefaultBattleOrder,
+    DoubleBattleOrder,
+    PassBattleOrder,
+    SingleBattleOrder,
+)
+from poke_env.ps_client import LocalhostServerConfiguration
 from poke_env.concurrency import POKE_LOOP
 
 from ..players.vgc_player import load_team, random_account, DEFAULT_TEAM_PATH
@@ -114,6 +124,222 @@ class _RandomOpponentV2(Player):
         return self.choose_random_doubles_move(battle)
 
 
+# Spread move targets that hit multiple opponents
+_SPREAD_TARGETS = {
+    Target.ALL_ADJACENT_FOES,
+    Target.ALL_ADJACENT,
+    Target.ALL,
+}
+
+
+class _HeuristicOpponentV2(Player):
+    """
+    Heuristic opponent that chooses moves based on damage estimation.
+
+    Evaluates: base_power × type_effectiveness × STAB × stat_ratio × accuracy
+    Falls back to random moves when heuristic can't find a good option.
+    """
+
+    def teampreview(self, battle: DoubleBattle) -> str:
+        team_size = min(len(battle.team), 6)
+        members = list(range(1, team_size + 1))
+        random.shuffle(members)
+        select_size = min(battle.max_team_size or 4, 4, team_size)
+        members = members[:select_size]
+        return "/team " + "".join(str(m) for m in members)
+
+    def choose_move(self, battle: DoubleBattle) -> BattleOrder:
+        """Choose moves based on damage estimation, fallback to random."""
+        try:
+            return self._choose_heuristic_move(battle)
+        except Exception:
+            # Any error in heuristic logic, fall back to random
+            return self.choose_random_doubles_move(battle)
+
+    def _choose_heuristic_move(self, battle: DoubleBattle) -> BattleOrder:
+        """Internal heuristic move selection."""
+        if any(battle.force_switch):
+            return self.choose_random_doubles_move(battle)
+
+        orders = []
+        switched_in = None
+        used_heuristic = False  # Track if we successfully used heuristic
+
+        for mon, moves, switches in zip(
+            battle.active_pokemon,
+            battle.available_moves,
+            battle.available_switches
+        ):
+            available_switches = [s for s in switches if s != switched_in]
+
+            if not mon or mon.fainted:
+                orders.append(PassBattleOrder())
+                continue
+
+            if not moves:
+                if available_switches:
+                    switch_target = random.choice(available_switches)
+                    orders.append(SingleBattleOrder(switch_target))
+                    switched_in = switch_target
+                else:
+                    orders.append(PassBattleOrder())
+                continue
+
+            best_order = self._find_best_move(battle, mon, moves)
+
+            if best_order is not None:
+                orders.append(best_order)
+                used_heuristic = True
+            elif moves:
+                # Fallback: pick first available move with a random valid target
+                move = moves[0]
+                targets = battle.get_possible_showdown_targets(move, mon)
+                if targets:
+                    orders.append(SingleBattleOrder(move, move_target=targets[0]))
+                else:
+                    orders.append(SingleBattleOrder(move))
+            elif available_switches:
+                switch_target = random.choice(available_switches)
+                orders.append(SingleBattleOrder(switch_target))
+                switched_in = switch_target
+            else:
+                orders.append(PassBattleOrder())
+
+        # If we didn't use heuristic at all, fall back to random
+        if not used_heuristic:
+            return self.choose_random_doubles_move(battle)
+
+        # Try to join orders
+        if len(orders) >= 2 and (orders[0] or orders[1]):
+            joined = DoubleBattleOrder.join_orders([orders[0]], [orders[1]])
+            if joined:
+                return joined[0]
+
+        # Fallback to random if joining failed
+        return self.choose_random_doubles_move(battle)
+
+    def _find_best_move(self, battle: DoubleBattle, mon: Pokemon, moves) -> SingleBattleOrder:
+        """Find the best move and target."""
+        best_move = None
+        best_target = None
+        best_score = -1
+
+        for move in moves:
+            if move.base_power == 0:
+                continue
+
+            targets = battle.get_possible_showdown_targets(move, mon)
+
+            for target in targets:
+                if target not in [battle.OPPONENT_1_POSITION, battle.OPPONENT_2_POSITION]:
+                    continue
+
+                target_idx = target - 1
+                if target_idx < 0 or target_idx >= len(battle.opponent_active_pokemon):
+                    continue
+
+                opp = battle.opponent_active_pokemon[target_idx]
+                if not opp or opp.fainted:
+                    continue
+
+                score = self._estimate_damage(move, mon, opp)
+
+                if move.target in _SPREAD_TARGETS:
+                    other_opp = battle.opponent_active_pokemon[1 - target_idx]
+                    if other_opp and not other_opp.fainted:
+                        score *= 1.5
+
+                if score > best_score:
+                    best_score = score
+                    best_move = move
+                    best_target = target
+
+        if best_move is not None and best_target is not None:
+            return SingleBattleOrder(best_move, move_target=best_target)
+        return None
+
+    def _estimate_damage(self, move: Move, attacker: Pokemon, defender: Pokemon) -> float:
+        """Estimate damage: base_power × type_mult × STAB × stat_ratio × accuracy"""
+        base = move.base_power
+        type_mult = defender.damage_multiplier(move)
+        stab = 1.5 if move.type in attacker.types else 1.0
+
+        if move.category == MoveCategory.PHYSICAL:
+            atk_stat = attacker.base_stats.get("atk", 100)
+            def_stat = defender.base_stats.get("def", 100)
+        elif move.category == MoveCategory.SPECIAL:
+            atk_stat = attacker.base_stats.get("spa", 100)
+            def_stat = defender.base_stats.get("spd", 100)
+        else:
+            return 0
+
+        stat_ratio = atk_stat / max(def_stat, 1)
+        accuracy = move.accuracy if move.accuracy else 1.0
+
+        return base * type_mult * stab * stat_ratio * accuracy
+
+
+class _MaxPowerOpponentV2(Player):
+    """Simple opponent that picks highest base power move (no type consideration)."""
+
+    def teampreview(self, battle: DoubleBattle) -> str:
+        team_size = min(len(battle.team), 6)
+        members = list(range(1, team_size + 1))
+        random.shuffle(members)
+        select_size = min(battle.max_team_size or 4, 4, team_size)
+        members = members[:select_size]
+        return "/team " + "".join(str(m) for m in members)
+
+    def choose_move(self, battle: DoubleBattle) -> BattleOrder:
+        """Pick highest base power move for each Pokemon."""
+        if any(battle.force_switch):
+            return self.choose_random_doubles_move(battle)
+
+        orders = []
+        switched_in = None
+
+        for mon, moves, switches in zip(
+            battle.active_pokemon,
+            battle.available_moves,
+            battle.available_switches
+        ):
+            available_switches = [s for s in switches if s != switched_in]
+
+            if not mon or mon.fainted:
+                orders.append(PassBattleOrder())
+                continue
+
+            if not moves:
+                if available_switches:
+                    switch_target = random.choice(available_switches)
+                    orders.append(SingleBattleOrder(switch_target))
+                    switched_in = switch_target
+                else:
+                    orders.append(DefaultBattleOrder())
+                continue
+
+            # Find highest power move
+            best_move = max(moves, key=lambda m: m.base_power, default=None)
+
+            if best_move and best_move.base_power > 0:
+                targets = battle.get_possible_showdown_targets(best_move, mon)
+                opp_targets = [t for t in targets if t in [battle.OPPONENT_1_POSITION, battle.OPPONENT_2_POSITION]]
+                target = random.choice(opp_targets) if opp_targets else (targets[0] if targets else None)
+                if target:
+                    orders.append(SingleBattleOrder(best_move, move_target=target))
+                else:
+                    orders.append(DefaultBattleOrder())
+            else:
+                orders.append(DefaultBattleOrder())
+
+        if orders[0] or orders[1]:
+            joined = DoubleBattleOrder.join_orders([orders[0]], [orders[1]])
+            if joined:
+                return joined[0]
+
+        return self.choose_random_doubles_move(battle)
+
+
 class VGCEnvV2(Env):
     """
     VGC Environment V2 with Discrete(11449) action space and improved observations.
@@ -145,13 +371,28 @@ class VGCEnvV2(Env):
         battle_format: str = "gen9vgc2026regf",
         team_path: Union[str, Path] = DEFAULT_TEAM_PATH,
         opponent_team_path: Optional[Union[str, Path]] = None,
+        opponent_type: str = "random",
         reward_config: Optional[Dict[str, float]] = None,
     ):
+        """
+        Initialize VGC Environment V2.
+
+        Args:
+            battle_format: VGC format string
+            team_path: Path to agent's team file
+            opponent_team_path: Path to opponent's team file (uses same team if None)
+            opponent_type: Type of opponent - "random", "heuristic", or "max_power"
+            reward_config: Custom reward weights (optional)
+        """
         super().__init__()
 
         self.battle_format = battle_format
         self.team_path = Path(team_path)
         self.opponent_team_path = Path(opponent_team_path) if opponent_team_path else self.team_path
+        self.opponent_type = opponent_type
+
+        if opponent_type not in ["random", "heuristic", "max_power"]:
+            raise ValueError(f"Unknown opponent_type: {opponent_type}. Use 'random', 'heuristic', or 'max_power'")
 
         self._team = load_team(self.team_path)
         self._opponent_team = load_team(self.opponent_team_path)
@@ -160,7 +401,7 @@ class VGCEnvV2(Env):
         self._action_queue: Queue = Queue()
 
         self._agent: Optional[_RLPlayerV2] = None
-        self._opponent: Optional[_RandomOpponentV2] = None
+        self._opponent: Optional[Player] = None  # Can be random, heuristic, or max_power
         self._battle_task = None
 
         self._current_battle: Optional[DoubleBattle] = None
@@ -222,7 +463,15 @@ class VGCEnvV2(Env):
             )
 
         if self._opponent is None:
-            self._opponent = _RandomOpponentV2(
+            # Select opponent class based on opponent_type
+            opponent_classes = {
+                "random": _RandomOpponentV2,
+                "heuristic": _HeuristicOpponentV2,
+                "max_power": _MaxPowerOpponentV2,
+            }
+            opponent_class = opponent_classes[self.opponent_type]
+
+            self._opponent = opponent_class(
                 account_configuration=random_account("OpponentV2"),
                 battle_format=self.battle_format,
                 team=self._opponent_team,
