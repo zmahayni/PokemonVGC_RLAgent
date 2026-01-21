@@ -61,6 +61,8 @@ class _RLPlayerV2(Player):
     Internal player class that bridges poke-env's async Player with gym's sync interface.
     """
 
+    _choose_move_count = 0
+
     def __init__(
         self,
         battle_queue: Queue,
@@ -91,19 +93,32 @@ class _RLPlayerV2(Player):
 
     async def _async_choose_move(self, battle: DoubleBattle) -> BattleOrder:
         """Async version that bridges to the sync queue interface."""
+        _RLPlayerV2._choose_move_count += 1
+        call_id = _RLPlayerV2._choose_move_count
+
         self._current_battle = battle
         self._battle_queue.put(battle)
 
+        # Wait for action with timeout tracking
+        wait_iterations = 0
         while True:
             try:
                 action = self._action_queue.get(timeout=0.1)
                 break
             except Empty:
+                wait_iterations += 1
+                if wait_iterations % 100 == 0:  # Log every 10 seconds
+                    print(f"[AGENT] choose_move #{call_id}: waiting for action ({wait_iterations * 0.1:.1f}s), "
+                          f"turn={battle.turn}, tag={battle.battle_tag}", flush=True)
+                if wait_iterations > 300:  # 30 second timeout
+                    print(f"[AGENT] choose_move #{call_id}: TIMEOUT waiting for action, using random", flush=True)
+                    return self.choose_random_doubles_move(battle)
                 await asyncio.sleep(0.01)
 
         try:
             order = DoublesEnv.action_to_order(action, battle, fake=False, strict=False)
-        except Exception:
+        except Exception as e:
+            print(f"[AGENT] choose_move #{call_id}: action_to_order failed ({e}), using random", flush=True)
             order = self.choose_random_doubles_move(battle)
 
         return order
@@ -140,6 +155,8 @@ class _HeuristicOpponentV2(Player):
     Falls back to random moves when heuristic can't find a good option.
     """
 
+    _choose_move_count = 0
+
     def teampreview(self, battle: DoubleBattle) -> str:
         team_size = min(len(battle.team), 6)
         members = list(range(1, team_size + 1))
@@ -150,10 +167,14 @@ class _HeuristicOpponentV2(Player):
 
     def choose_move(self, battle: DoubleBattle) -> BattleOrder:
         """Choose moves based on damage estimation, fallback to random."""
+        _HeuristicOpponentV2._choose_move_count += 1
+        call_id = _HeuristicOpponentV2._choose_move_count
+
         try:
-            return self._choose_heuristic_move(battle)
-        except Exception:
-            # Any error in heuristic logic, fall back to random
+            order = self._choose_heuristic_move(battle)
+            return order
+        except Exception as e:
+            print(f"[HEURISTIC] choose_move #{call_id}: exception ({e}), using random", flush=True)
             return self.choose_random_doubles_move(battle)
 
     def _choose_heuristic_move(self, battle: DoubleBattle) -> BattleOrder:
@@ -406,6 +427,7 @@ class VGCEnvV2(Env):
 
         self._current_battle: Optional[DoubleBattle] = None
         self._episode_started = False
+        self._episode_count = 0
 
         # Action space: Discrete(11449) = 107*107 for joint actions
         self.action_space = Discrete(ACTION_SPACE_SIZE * ACTION_SPACE_SIZE)
@@ -481,6 +503,26 @@ class VGCEnvV2(Env):
                 log_level=logging.CRITICAL,
             )
 
+    def _cleanup_players(self):
+        """Clean up existing players (disconnect from server)."""
+        if self._agent is not None:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._agent.ps_client.stop_listening(), POKE_LOOP
+                ).result(timeout=2.0)
+            except Exception:
+                pass
+            self._agent = None
+
+        if self._opponent is not None:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._opponent.ps_client.stop_listening(), POKE_LOOP
+                ).result(timeout=2.0)
+            except Exception:
+                pass
+            self._opponent = None
+
     def reset(
         self,
         seed: Optional[int] = None,
@@ -500,19 +542,35 @@ class VGCEnvV2(Env):
             except Empty:
                 break
 
-        self._ensure_players_exist()
         self._current_battle = None
         self._episode_started = False
+        self._episode_count += 1
 
-        async def _run_battle():
-            await self._agent.battle_against(self._opponent, n_battles=1)
+        # Try to start battle, with retry on failure (recreate players if needed)
+        max_retries = 3
+        for attempt in range(max_retries):
+            self._ensure_players_exist()
 
-        self._battle_task = asyncio.run_coroutine_threadsafe(_run_battle(), POKE_LOOP)
+            async def _run_battle():
+                await self._agent.battle_against(self._opponent, n_battles=1)
 
-        try:
-            self._current_battle = self._battle_queue.get(timeout=30.0)
-        except Empty:
-            raise RuntimeError("Timeout waiting for battle to start. Is the server running?")
+            self._battle_task = asyncio.run_coroutine_threadsafe(_run_battle(), POKE_LOOP)
+
+            try:
+                self._current_battle = self._battle_queue.get(timeout=30.0)
+                break  # Success
+            except Empty:
+                print(f"[ENV] Episode #{self._episode_count}: attempt {attempt+1}/{max_retries} "
+                      f"TIMEOUT waiting for battle to start", flush=True)
+                if attempt < max_retries - 1:
+                    # Recreate players for next attempt
+                    print("[ENV] Recreating players...", flush=True)
+                    self._cleanup_players()
+                else:
+                    print("[ENV] All retries failed!", flush=True)
+                    print(f"[ENV] Agent choose_move calls: {_RLPlayerV2._choose_move_count}", flush=True)
+                    print(f"[ENV] Heuristic choose_move calls: {_HeuristicOpponentV2._choose_move_count}", flush=True)
+                    raise RuntimeError("Timeout waiting for battle to start after retries. Is the server running?")
 
         self._episode_started = True
         self._last_reward_state = self._compute_reward_state()
@@ -525,12 +583,17 @@ class VGCEnvV2(Env):
 
         return obs, info
 
+    _step_count = 0
+
     def step(
         self,
         action: int
     ) -> Tuple[npt.NDArray[np.float32], float, bool, bool, Dict[str, Any]]:
         if not self._episode_started or self._current_battle is None:
             raise RuntimeError("Environment not initialized. Call reset() first.")
+
+        VGCEnvV2._step_count += 1
+        step_id = VGCEnvV2._step_count
 
         # Convert flat action to action pair
         action_pair = flat_to_action_pair(action)
@@ -542,6 +605,9 @@ class VGCEnvV2(Env):
         try:
             self._current_battle = self._battle_queue.get(timeout=5.0)
         except Empty:
+            print(f"[ENV] step #{step_id}: timeout waiting for battle state, "
+                  f"turn={self._current_battle.turn if self._current_battle else '?'}, "
+                  f"tag={self._current_battle.battle_tag if self._current_battle else '?'}", flush=True)
             if self._agent and self._agent._current_battle and self._agent._current_battle.finished:
                 self._current_battle = self._agent._current_battle
                 terminated = True

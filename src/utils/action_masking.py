@@ -12,7 +12,7 @@ Key concepts:
 
 import sys
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 import numpy.typing as npt
@@ -20,8 +20,15 @@ import numpy.typing as npt
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "poke-env" / "src"))
 
 from poke_env.battle.double_battle import DoubleBattle
+from poke_env.battle.move import Move
+from poke_env.battle.pokemon import Pokemon
 from poke_env.environment.doubles_env import DoublesEnv
-from poke_env.player.battle_order import DoubleBattleOrder
+from poke_env.player.battle_order import (
+    DoubleBattleOrder,
+    SingleBattleOrder,
+    PassBattleOrder,
+    DefaultBattleOrder,
+)
 
 
 # Action space constants for Gen 9
@@ -30,6 +37,92 @@ NUM_MOVES = 4
 NUM_TARGETS = 5
 NUM_GIMMICKS = 5  # none, mega, z-move, dynamax, tera
 ACTION_SPACE_SIZE = 1 + NUM_SWITCHES + NUM_MOVES * NUM_TARGETS * NUM_GIMMICKS  # = 107
+
+
+def _single_order_to_action(
+    order: SingleBattleOrder,
+    battle: DoubleBattle,
+    pos: int
+) -> Optional[int]:
+    """
+    Convert a SingleBattleOrder to an action index.
+
+    This is a custom implementation that handles Terastallized Pokemon forms
+    better than poke-env's built-in conversion by using available_moves directly.
+
+    Returns None if conversion fails.
+    """
+    # Handle pass/default orders
+    if isinstance(order, PassBattleOrder):
+        return 0
+    if isinstance(order, DefaultBattleOrder):
+        return None  # Default orders shouldn't be in valid_orders
+
+    # Handle string orders (shouldn't happen but just in case)
+    if isinstance(order.order, str):
+        return 0 if order.order == "pass" else None
+
+    # Switch order
+    if isinstance(order.order, Pokemon):
+        try:
+            # Find the team slot (1-indexed)
+            team_list = list(battle.team.values())
+            for i, mon in enumerate(team_list):
+                if mon.base_species == order.order.base_species:
+                    return i + 1  # 1-6 for switches
+            return None
+        except Exception:
+            return None
+
+    # Move order
+    if isinstance(order.order, Move):
+        move = order.order
+
+        # Use available_moves to find the move index - this handles Tera forms correctly
+        available = battle.available_moves[pos] if pos < len(battle.available_moves) else []
+
+        move_idx = None
+        for i, m in enumerate(available):
+            if m.id == move.id:
+                move_idx = i
+                break
+
+        # Fallback: try the Pokemon's moves dictionary
+        if move_idx is None:
+            active_mon = battle.active_pokemon[pos] if pos < len(battle.active_pokemon) else None
+            if active_mon and active_mon.moves:
+                move_ids = [m.id for m in active_mon.moves.values()]
+                if move.id in move_ids:
+                    move_idx = move_ids.index(move.id)
+
+        if move_idx is None or move_idx >= NUM_MOVES:
+            return None
+
+        # Target offset (0-4, representing targets -2 to +2)
+        target = order.move_target + 2 if order.move_target is not None else 2
+        if target < 0 or target >= NUM_TARGETS:
+            target = 2  # Default to no target
+
+        # Gimmick
+        if order.mega:
+            gimmick = 1
+        elif order.z_move:
+            gimmick = 2
+        elif order.dynamax:
+            gimmick = 3
+        elif order.terastallize:
+            gimmick = 4
+        else:
+            gimmick = 0
+
+        # Action = 7 + (move_idx * 5) + target + (gimmick * 20)
+        action = 1 + NUM_SWITCHES + NUM_TARGETS * move_idx + target + 20 * gimmick
+
+        if 0 <= action < ACTION_SPACE_SIZE:
+            return action
+        return None
+
+    return None
 
 
 def decode_action(action: int) -> str:
@@ -116,6 +209,8 @@ def get_valid_actions_per_position(
     return mask0, mask1
 
 
+_mask_call_count = 0
+
 def get_action_mask(battle: DoubleBattle) -> npt.NDArray[np.bool_]:
     """
     Get the full joint-action mask for valid action pairs.
@@ -130,6 +225,10 @@ def get_action_mask(battle: DoubleBattle) -> npt.NDArray[np.bool_]:
         Boolean array of shape (107, 107) where mask[a0, a1] is True if
         the action pair (a0, a1) is valid.
     """
+    global _mask_call_count
+    _mask_call_count += 1
+    call_id = _mask_call_count
+
     mask = np.zeros((ACTION_SPACE_SIZE, ACTION_SPACE_SIZE), dtype=bool)
 
     # Get all joint-legal orders
@@ -137,18 +236,29 @@ def get_action_mask(battle: DoubleBattle) -> npt.NDArray[np.bool_]:
     valid_orders_1 = battle.valid_orders[1]
     joint_legal = DoubleBattleOrder.join_orders(valid_orders_0, valid_orders_1)
 
-    # Convert each joint-legal order to action pair
-    failed_conversions = []
+    # Convert each joint-legal order to action pair using our custom converter
+    # that handles Terastallized forms correctly
+    failed_a0 = 0
+    failed_a1 = 0
     for double_order in joint_legal:
-        try:
-            action = DoublesEnv.order_to_action(double_order, battle, fake=True)
-            a0, a1 = action[0], action[1]
+        a0 = _single_order_to_action(double_order.first_order, battle, 0)
+        a1 = _single_order_to_action(double_order.second_order, battle, 1)
+
+        if a0 is None:
+            failed_a0 += 1
+        if a1 is None:
+            failed_a1 += 1
+
+        if a0 is not None and a1 is not None:
             if 0 <= a0 < ACTION_SPACE_SIZE and 0 <= a1 < ACTION_SPACE_SIZE:
                 mask[a0, a1] = True
-            else:
-                failed_conversions.append(f"Out of range: {double_order} -> ({a0}, {a1})")
-        except (ValueError, IndexError) as e:
-            failed_conversions.append(f"Exception for {double_order}: {e}")
+
+    # Debug: if many conversions failed, log it
+    valid_count = mask.sum()
+    if valid_count == 0 and len(joint_legal) > 0:
+        print(f"[MASK] #{call_id}: ALL conversions failed! joint_legal={len(joint_legal)}, "
+              f"failed_a0={failed_a0}, failed_a1={failed_a1}, turn={battle.turn}", flush=True)
+        print(f"[MASK] Active: {[p.species if p else None for p in battle.active_pokemon]}", flush=True)
 
     return mask
 
@@ -180,15 +290,8 @@ def get_action_mask_flat(battle: DoubleBattle, debug: bool = False) -> npt.NDArr
     # This prevents MaskablePPO from crashing. The environment will handle
     # invalid actions gracefully by falling back to random valid moves.
     if not flat_mask.any():
-        print("\n" + "="*60, flush=True)
-        print("WARNING: NO VALID ACTIONS IN MASK - allowing all actions", flush=True)
-        print(f"Battle tag: {battle.battle_tag}", flush=True)
-        print(f"Turn: {battle.turn}, Finished: {battle.finished}", flush=True)
-        print(f"Force switch: {battle.force_switch}", flush=True)
-        print(f"Active pokemon: {[p.species if p else None for p in battle.active_pokemon]}", flush=True)
-        print(f"Valid orders[0]: {len(battle.valid_orders[0])}", flush=True)
-        print(f"Valid orders[1]: {len(battle.valid_orders[1])}", flush=True)
-        print("="*60 + "\n", flush=True)
+        if debug:
+            print(f"[WARN] No valid actions at turn {battle.turn}, allowing all", flush=True)
         return np.ones(ACTION_SPACE_SIZE * ACTION_SPACE_SIZE, dtype=bool)
 
     if debug:

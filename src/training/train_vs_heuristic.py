@@ -92,6 +92,8 @@ CONFIG = {
     "save_freq": 50_000,
     "log_dir": PROJECT_ROOT / "logs",
     "model_dir": PROJECT_ROOT / "models",
+    # Set to a model path to resume training, or None to start fresh
+    "resume_from": PROJECT_ROOT / "models" / "vgc_v2_heuristic_20260119_110615_final.zip",
 }
 
 
@@ -107,7 +109,8 @@ class ProgressCallback(BaseCallback):
         self.recent_rewards = []
 
     def _on_training_start(self):
-        self.pbar = tqdm(total=self.total_timesteps, desc="Training vs Heuristic", unit="steps")
+        desc = "Continuing vs Heuristic" if CONFIG.get("resume_from") else "Training vs Heuristic"
+        self.pbar = tqdm(total=self.total_timesteps, desc=desc, unit="steps")
 
     def _on_step(self) -> bool:
         if self.pbar:
@@ -174,6 +177,8 @@ def train():
     run_name = f"vgc_v2_heuristic_{timestamp}"
 
     print(f"  Total timesteps: {CONFIG['total_timesteps']:,}")
+    if CONFIG.get("resume_from"):
+        print(f"  Resuming from: {CONFIG['resume_from']}")
     print()
 
     print("Creating V2 environment with heuristic opponent...")
@@ -187,23 +192,33 @@ def train():
     env = Monitor(env)
     env = ActionMaskWrapper(env)
 
-    print("Creating MaskablePPO model...")
-    model = MaskablePPO(
-        "MlpPolicy",
-        env,
-        learning_rate=CONFIG["learning_rate"],
-        n_steps=CONFIG["n_steps"],
-        batch_size=CONFIG["batch_size"],
-        n_epochs=CONFIG["n_epochs"],
-        gamma=CONFIG["gamma"],
-        gae_lambda=CONFIG["gae_lambda"],
-        clip_range=CONFIG["clip_range"],
-        ent_coef=CONFIG["ent_coef"],
-        vf_coef=CONFIG["vf_coef"],
-        max_grad_norm=CONFIG["max_grad_norm"],
-        verbose=0,
-        tensorboard_log=str(CONFIG["log_dir"]),
-    )
+    # Load existing model or create new one
+    if CONFIG.get("resume_from") and Path(CONFIG["resume_from"]).exists():
+        print(f"Loading model from {CONFIG['resume_from']}...")
+        model = MaskablePPO.load(
+            str(CONFIG["resume_from"]),
+            env=env,
+            tensorboard_log=str(CONFIG["log_dir"]),
+        )
+        print("Model loaded successfully!")
+    else:
+        print("Creating new MaskablePPO model...")
+        model = MaskablePPO(
+            "MlpPolicy",
+            env,
+            learning_rate=CONFIG["learning_rate"],
+            n_steps=CONFIG["n_steps"],
+            batch_size=CONFIG["batch_size"],
+            n_epochs=CONFIG["n_epochs"],
+            gamma=CONFIG["gamma"],
+            gae_lambda=CONFIG["gae_lambda"],
+            clip_range=CONFIG["clip_range"],
+            ent_coef=CONFIG["ent_coef"],
+            vf_coef=CONFIG["vf_coef"],
+            max_grad_norm=CONFIG["max_grad_norm"],
+            verbose=0,
+            tensorboard_log=str(CONFIG["log_dir"]),
+        )
 
     callbacks = [
         ProgressCallback(total_timesteps=CONFIG["total_timesteps"], verbose=0),
